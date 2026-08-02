@@ -1,12 +1,12 @@
 import socket
 
 client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-host = 'localhost'
-port = 8080
+HOST = 'localhost'
+PORT = 8080
 
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
-        client.connect((host, port))
+        client.connect((HOST, PORT))
         data = client.recv(1024)
 
         if data == b"OK\n":
@@ -15,6 +15,6 @@ try:
             print("Данные, полученные от сервера некорректны!")
 
 except ConnectionRefusedError:
-    print(f"Не удалось подключиться к серверу {host}:{port}. Убедитесь, что сервер запущен!")
+    print(f"Не удалось подключиться к серверу {HOST}:{PORT}. Убедитесь, что сервер запущен!")
 except Exception as e:
-    print(f"Произошла непредвиденная сетевая ошибка: {e}")
+    print(f"Произошла сетевая ошибка: {e}")
