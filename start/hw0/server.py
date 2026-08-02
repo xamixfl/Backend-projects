@@ -16,4 +16,3 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
                 client.sendall(b"OK\n")
     except KeyboardInterrupt:
         print("\nСервер остановлен пользователем.")
-        
