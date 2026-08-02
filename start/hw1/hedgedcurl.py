@@ -3,6 +3,9 @@ import asyncio
 import argparse
 import sys
 
+TIMEOUT_ERROR = 228
+ALL_REQUEST_ERROR = 1
+
 async def fetch_url(client, url, timeout):
     try:
         response = await client.get(url, timeout=timeout)
@@ -11,7 +14,8 @@ async def fetch_url(client, url, timeout):
             'status_code': response.status_code,
             'headers': response.headers,
             'content': response.text,
-            'error': None
+            'error': None,
+            'is_timeout': False
         }
     
     except httpx.TimeoutException:
@@ -21,7 +25,7 @@ async def fetch_url(client, url, timeout):
             'headers': None,
             'content': None,
             'error': 'Timeout',
-            'is_timeout': True
+            'is_timeout': True   
         }
     
     except httpx.RequestError as e:
@@ -30,13 +34,24 @@ async def fetch_url(client, url, timeout):
             'status_code': None,
             'headers': None,
             'content': None,
-            'error': str(e)
+            'error': str(e),
+            'is_timeout': False
+        }
+
+    except Exception as err:
+        return {
+            'url': url,
+            'status_code': None,
+            'headers': None,
+            'content': None,
+            'error': str(err),
+            'is_timeout': False
         }
     
 def print_result(result):
     print(f"Status: {result['status_code']}")
     for key, value in result['headers'].items():
-        formatted_key = "-Indexes-".join([w.capitalize() for w in key.split("-")]) if "-" in key else key.capitalize() # Приведение к нужному форматированию
+        formatted_key = "-".join([w.capitalize() for w in key.split("-")]) if "-" in key else key.capitalize() # Приведение к нужному форматированию
         print(f"{formatted_key}: {value}")
     print()
     print(result['content'])
@@ -46,8 +61,13 @@ async def hedged_curl(urls, timeout):
     #await asyncio.sleep(0.001)
     async with httpx.AsyncClient() as client:
         tasks = [asyncio.create_task(fetch_url(client, url, timeout)) for url in urls]
+
+        has_timeout = False
         for future in asyncio.as_completed(tasks):
             result = await future
+            if result['is_timeout']:
+                has_timeout = True
+
             if result['error'] is not None:
                 continue
 
@@ -59,7 +79,7 @@ async def hedged_curl(urls, timeout):
             return 0
 
         print("Все запросы завершились ошибкой!")
-        return 228
+        return TIMEOUT_ERROR if has_timeout else ALL_REQUEST_ERROR
 
 def main():
     parser = argparse.ArgumentParser(
