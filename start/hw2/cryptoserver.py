@@ -13,15 +13,20 @@ import jwt
 import asyncio
 import uvicorn
 import bcrypt
+import os
+from dotenv import load_dotenv
 
 from contextlib import asynccontextmanager
 
-SECRET_KEY = "super-secret-key"
+load_dotenv()
+
+SECRET_KEY = os.environ["SECRET_KEY"]
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 users_db = {}
 crypto_db = {}
+coingecko_id_cache = {}         # Словарь для кеширования маппинга тикер -> ID (например, {"BTC": "bitcoin"})
 security = HTTPBearer()
 
 # Расписание автоматического обновления
@@ -39,18 +44,41 @@ def hash_password(password: str) -> str:
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
 
+async def get_coingecko_id(client: httpx.AsyncClient, symbol: str) -> str:
+    symbol_lower = symbol.lower()
+
+    if symbol_lower in coingecko_id_cache:
+        return coingecko_id_cache[symbol_lower]
+
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={symbol_lower}"
+    response = await client.get(url, timeout=10.0)
+    
+    if response.status_code == 200:
+        data = response.json()
+        if data and "id" in data[0]:
+            coin_id = data[0]["id"]
+            coingecko_id_cache[symbol_lower] = coin_id
+            return coin_id
+            
+    return None
+
 async def update_all_prices():
     updated_count = 0
     is_error = False
+
+    symbols = list(crypto_db.keys())
     
     async with httpx.AsyncClient() as client:
-        for symbol in list(crypto_db.keys()):
-            try:
-                symbol_lower = symbol.lower()
-                url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={symbol_lower}"
+        for symbol in symbols:
+            if symbol not in crypto_db:
+                continue
                 
-                response = await client.get(url, timeout=10.0)
-                if response.status_code != 200:
+            symbol_lower = symbol.lower()
+            
+            try:
+                response = await fetch_coingecko_market_data(client, symbol_lower)
+                
+                if response is None or response.status_code != 200:
                     is_error = True
                     continue
 
@@ -68,13 +96,14 @@ async def update_all_prices():
                 is_error = True
                 continue
 
-            crypto_db[symbol]["history"].append({
-                "price": current_price,
-                "timestamp": now 
-            })
-            crypto_db[symbol]["current_price"] = current_price
-            crypto_db[symbol]["last_updated"] = now  
-            updated_count += 1
+            if symbol in crypto_db:
+                crypto_db[symbol]["history"].append({
+                    "price": current_price,
+                    "timestamp": now 
+                })
+                crypto_db[symbol]["current_price"] = current_price
+                crypto_db[symbol]["last_updated"] = now  
+                updated_count += 1
 
     return updated_count, is_error
 
@@ -100,6 +129,27 @@ async def background_price_updater():
             pass
         except Exception as e:
             print(f"Ошибка в воркере: {e}")
+
+# Функция запроса к CoinGecko с обработкой статуса 429 (Too Many Requests)
+async def fetch_coingecko_market_data(client: httpx.AsyncClient, symbol_lower: str, max_retries: int = 3):
+    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={symbol_lower}"
+    
+    for attempt in range(max_retries):
+        try:
+            response = await client.get(url, timeout=10.0)
+            
+            if response.status_code == 429:
+                wait_time = 2 ** attempt
+                await asyncio.sleep(wait_time)
+                continue
+                
+            return response
+        except httpx.RequestError:
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(1)
+            
+    return None
         
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -217,15 +267,14 @@ async def add_crypto(item: CryptoCreateRequest, current_user: str = Depends(get_
             content={"error": "Эта криптовалюта уже добавлена для отслеживания"}
         )
 
-    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={symbol_lower}"
-    
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, timeout=10.0)
-            if response.status_code != 200:
+            response = await fetch_coingecko_market_data(client, symbol_lower)
+            
+            if response is None or response.status_code != 200:
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "Ошибка при обращении к внешнему API криптовалют"}
+                    content={"error": "Ошибка при обращении к внешнему API криптовалют (возможно, превышен лимит)"}
                 )
             
             data = response.json()
@@ -287,7 +336,7 @@ async def get_crypto_by_symbol(symbol: str, current_user: str = Depends(get_curr
     
     return JSONResponse(
         status_code=200,
-        content={"symbol": symbol, "name": crypto_data["name"], "current_price": crypto_data["current_price"], "last_updated": crypto_data["last_updated"]}
+        content={"symbol": symbol_upper, "name": crypto_data["name"], "current_price": crypto_data["current_price"], "last_updated": crypto_data["last_updated"]}
     )
 
 @app.put("/crypto/{symbol}/refresh")
@@ -300,15 +349,14 @@ async def update_price_by_symbol(symbol: str, current_user: str = Depends(get_cu
             content={"error": "Валюта не найдена"}
         )
 
-    url = f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&symbols={symbol_lower}"
-        
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, timeout=10.0)
-            if response.status_code != 200:
+            response = await fetch_coingecko_market_data(client, symbol_lower)
+            
+            if response is None or response.status_code != 200:
                 return JSONResponse(
                     status_code=500,
-                    content={"error": "Ошибка при обращении к внешнему API криптовалют"}
+                    content={"error": "Ошибка при обращении к внешнему API криптовалют (возможно, превышен лимит)"}
                 )
             
             data = response.json()
@@ -327,6 +375,13 @@ async def update_price_by_symbol(symbol: str, current_user: str = Depends(get_cu
                 status_code=500,
                 content={"error": f"Сетевая ошибка: {str(e)}"}
             )
+
+    # Проверяем, не удалили ли валюту, пока мы ждали ответ от API
+    if symbol_upper not in crypto_db:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Валюта была удалена во время обновления"}
+        )
 
     crypto_db[symbol_upper]["history"].append({
         "price": current_price,
@@ -421,7 +476,8 @@ async def get_stats(symbol: str, current_user: str = Depends(get_current_user)):
 
 @app.delete("/crypto/{symbol}")
 async def delete(symbol: str, current_user: str = Depends(get_current_user)):
-    if symbol not in crypto_db:
+    symbol_upper = symbol.upper()
+    if symbol_upper not in crypto_db:
         return JSONResponse(
             status_code=404,
             content={"error": "Валюта не найдена"}
